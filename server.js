@@ -1,19 +1,22 @@
-const express = require('express');
-const path = require('path');
-const cookieParser = require('cookie-parser');
-const axios = require('axios');
-const authMiddleware = require('./middleware/authMiddleware');
-const spFilesRoute = require('./routes/sp-files');
-require('dotenv').config();
-const { ConfidentialClientApplication } = require('@azure/msal-node');
+import express              from 'express';
+import path                 from 'path';
+import { fileURLToPath }    from 'url';
+import cookieParser         from 'cookie-parser';
+import axios                from 'axios';
+import { ConfidentialClientApplication } from '@azure/msal-node';
+import authMiddleware       from './middleware/authMiddleware.js';
+import spFilesRoute         from './routes/sp-files.js';
+import dotenv               from 'dotenv';
+dotenv.config();
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ---------- MSAL (Azure AD) ----------
-const msalInstance = new ConfidentialClientApplication({
+// ---------- MSAL ----------
+const msal = new ConfidentialClientApplication({
   auth: {
     clientId: process.env.AZURE_CLIENT_ID,
     authority: `https://login.microsoftonline.com/${process.env.AZURE_TENANT_ID}`,
@@ -22,53 +25,57 @@ const msalInstance = new ConfidentialClientApplication({
 });
 
 // ---------- ROUTES ----------
+app.get('/', (_ ,res) => res.sendFile(path.join(__dirname,'public','index.html')));
 
-// startpagina
-app.get('/', (_, res) =>
-  res.sendFile(path.join(__dirname, 'public', 'index.html')));
-
-// login
-app.get('/auth/login', async (_, res) => {
-  const url = await msalInstance.getAuthCodeUrl({
-    scopes: ['Files.Read.All', 'Sites.Read.All', 'User.Read'],
+app.get('/auth/login', async (_ ,res) => {
+  const url = await msal.getAuthCodeUrl({
+    scopes: ['Files.Read.All','Sites.Read.All','User.Read'],
     redirectUri: process.env.AZURE_REDIRECT_URI
   });
   res.redirect(url);
 });
 
-// OAuth-callback
-app.get('/auth/redirect', async (req, res) => {
-  const tokenResponse = await msalInstance.acquireTokenByCode({
+app.get('/auth/redirect', async (req,res) => {
+  const token = await msal.acquireTokenByCode({
     code: req.query.code,
-    scopes: ['Files.Read.All', 'Sites.Read.All', 'User.Read'],
+    scopes: ['Files.Read.All','Sites.Read.All','User.Read'],
     redirectUri: process.env.AZURE_REDIRECT_URI
   });
-  res.cookie('auth_token', tokenResponse.accessToken, { httpOnly: true, secure: true });
+  res.cookie('auth_token', token.accessToken, { httpOnly:true, secure:true });
   res.redirect('/');
 });
 
-// SharePoint-bestanden
+// SharePoint
 app.use('/sp/files', authMiddleware, spFilesRoute);
 
-// Chat-frontend
-app.get('/chat', (_, res) =>
-  res.sendFile(path.join(__dirname, 'public', 'chat.html')));
-
 // Chat-API
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', async (req,res) => {
+  const vraag = (req.body.vraag||'').trim();
+  if(!vraag) return res.status(400).json({error:'Lege vraag'});
+
   try {
-    const vraag = req.body.vraag;
     const ai = await axios.post(
       'https://api.openai.com/v1/chat/completions',
-      { model: 'gpt-3.5-turbo', messages: [{ role: 'user', content: vraag }] },
-      { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` } }
+      {
+        model: 'gpt-3.5-turbo',
+        messages: [
+          { role:'system', content:'Je bent Finny, financieel adviseur.' },
+          { role:'user',   content: vraag }
+        ],
+        temperature: 0.3
+      },
+      { headers:{ Authorization:`Bearer ${process.env.OPENAI_API_KEY}` } }
     );
     res.json({ antwoord: ai.data.choices[0].message.content.trim() });
-  } catch (e) {
-    console.error(e.response?.data || e.message);
-    res.status(500).json({ error: 'Chat fout' });
+  } catch(e){
+    console.error(e.response?.data||e.message);
+    res.status(500).json({ error:'Chatserver-fout' });
   }
 });
 
-app.listen(process.env.PORT || 3000, () =>
-  console.log('Finny 4.7 draait'));
+// Chat-frontend
+app.get('/chat', (_ ,res)=>
+  res.sendFile(path.join(__dirname,'public','chat.html')));
+
+app.listen(process.env.PORT||3000, () =>
+  console.log('Finny 4.7 live op poort',process.env.PORT||3000));

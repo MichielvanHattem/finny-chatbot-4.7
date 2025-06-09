@@ -1,9 +1,11 @@
 <!DOCTYPE html><html lang="nl"><head>
 <meta charset="utf-8"><title>Finny Chat</title>
-<style>body{font-family:Arial;padding:40px}</style>
-</head><body>
-<input id="vraag" size="50" placeholder="Typ je vraag...">
+<link rel="stylesheet" href="/css/chat.css"></head><body>
+<label for="vraag">Stel je vraag:</label>
+<input id="vraag" type="text" size="50" placeholder="Typ je vraag..." />
 <button id="verzend">Verstuur</button>
-<p id="antwoord" style="margin-top:20px;font-weight:bold"></p>
+<h3>Antwoord:</h3>
+<pre id="antwoord"></pre>
 <script src="/js/chat.js"></script>
 </body></html>
+

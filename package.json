@@ -1,7 +1,8 @@
 {
-  "name": "finny-chatbot-4_7",
+  "name": "finny-chatbot-4.7",
   "version": "1.0.0",
   "main": "server.js",
+  "type": "module",
   "scripts": { "start": "node server.js" },
   "dependencies": {
     "@azure/msal-node": "^1.15.0",

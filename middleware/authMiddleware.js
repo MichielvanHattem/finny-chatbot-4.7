@@ -1,6 +1,6 @@
-module.exports = (req, res, next) => {
+export default (req,res,next) => {
   const token = req.cookies.auth_token;
-  if (!token) return res.status(401).json({ error: 'Geen token meegegeven' });
+  if(!token) return res.status(401).json({ error:'Geen token' });
   req.token = token;
   next();
 };
