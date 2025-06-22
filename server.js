@@ -1,3 +1,4 @@
+
 import express              from 'express';
 import path                 from 'path';
 import { fileURLToPath }    from 'url';
@@ -48,7 +49,7 @@ app.get('/auth/redirect', async (req,res) => {
 // SharePoint
 app.use('/sp/files', authMiddleware, spFilesRoute);
 
-// Chat-API
+// Chat-API OpenAI standaard
 app.post('/api/chat', async (req,res) => {
   const vraag = (req.body.vraag||'').trim();
   if(!vraag) return res.status(400).json({error:'Lege vraag'});
@@ -73,7 +74,42 @@ app.post('/api/chat', async (req,res) => {
   }
 });
 
-// Chat-frontend
+// Chat-API FiniMini (Azure)
+app.post("/api/finiMini", async (req, res) => {
+  const vraag = req.body.vraag;
+
+  try {
+    const response = await axios.post(
+      process.env.AZURE_ENDPOINT,
+      {
+        messages: [
+          {
+            role: "system",
+            content: "Je bent Finny, de financieel assistent van ZFG Finance. Beperk antwoorden tot je data."
+          },
+          {
+            role: "user",
+            content: vraag
+          }
+        ],
+        temperature: 0.3,
+        max_tokens: 1000
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          "api-key": process.env.AZURE_KEY
+        }
+      }
+    );
+    res.json(response.data);
+  } catch (err) {
+    console.error("Fout bij aanroepen Azure OpenAI:", err.message);
+    res.status(500).send("Fout bij ophalen van antwoord.");
+  }
+});
+
+// Frontend pagina
 app.get('/chat', (_ ,res)=>
   res.sendFile(path.join(__dirname,'public','chat.html')));
 
