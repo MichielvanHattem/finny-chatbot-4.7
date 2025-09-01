@@ -107,50 +107,59 @@ app.get('/debug/prompt', (_req,res)=>{
   res.json({ file: promptInfo.file, hash: promptInfo.hash, preview: promptInfo.text.slice(0,400) });
 });
 
-/* ---------- /api/chat → echte beantwoording via OpenAI ---------- */
-app.post('/api/chat', async (req,res)=>{
-  try{
-    const vraag = (req.body.vraag || req.body.q || '').trim();
-    if(!vraag) return res.status(400).json({ error:'Lege vraag' });
+/* ---------- /api/chat → OpenAI + JSON response ---------- */
+app.post('/api/chat', async (req, res) => {
+  const vraag = (req.body?.vraag || req.body?.q || '').trim();
+  if (!vraag) return res.status(400).json({ error: 'Lege vraag' });
 
-    const key   = process.env.OPENAI_API_KEY;
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-    if(!key){
-      // nette fallback (geen key)
-      const type = detectType(vraag);
-      const hint = bepaalBestand(vraag);
-      return res
-        .status(200)
-        .type('text/plain')
-        .send(`(stub) Geen OPENAI_API_KEY. Router: ${type}${hint?(' '+hint):''}`);
-    }
+  const sys   = promptInfo.ok ? promptInfo.text : '';
+  const key   = process.env.OPENAI_API_KEY;
+  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-    const payload = {
-      model,
-      temperature: 0.2,
-      max_tokens: 800,
-      messages: [
-        { role:'system', content: promptInfo.ok ? promptInfo.text : '' },
-        { role:'user',   content: vraag }
-      ]
-    };
+  // Geen key? Nette stub in JSON, UI kan het tonen
+  if (!key) {
+    const type = detectType(vraag);
+    const hint = bepaalBestand(vraag);
+    return res.status(200).json({
+      antwoord: `(stub) Geen OPENAI_API_KEY. Router: ${type}${hint ? ' ' + hint : ''}`,
+      provider: 'stub', version: VERSION, promptHash: promptInfo.ok ? promptInfo.hash : null
+    });
+  }
 
-    const rsp = await axios.post('https://api.openai.com/v1/chat/completions', payload, {
-      headers: { 'Content-Type':'application/json', Authorization: `Bearer ${key}` }
+  try {
+    const rsp = await axios.post(
+      'https://api.openai.com/v1/chat/completions',
+      {
+        model,
+        temperature: 0.2,
+        max_tokens: 800,
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user',   content: vraag }
+        ]
+      },
+      { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` } }
+    );
+
+    const antwoord = rsp?.data?.choices?.[0]?.message?.content?.trim() || '';
+    return res.status(200).json({
+      antwoord, provider: 'openai', version: VERSION,
+      promptHash: promptInfo.ok ? promptInfo.hash : null
     });
 
-    const answer = rsp?.data?.choices?.[0]?.message?.content?.trim() || '';
-    return res.type('text/plain').send(answer || '(leeg)');
-  }catch(e){
-    console.error('OpenAI fout:', e.response?.data || e.message);
-    // vriendelijke fallback
-    const vraag = (req.body.vraag || req.body.q || '').toLowerCase();
-    const router = /omzet/.test(vraag) ? { type:'pdf', hint:'jaarrekening_2023' }
-                 : /2022/.test(vraag)  ? { type:'csv', hint:'omzet_2022.csv' }
-                 : { type:'unknown', hint:null };
-    return res.status(200).type('text/plain').send(`(fallback) router: ${router.type} ${router.hint||''}`);
+  } catch (e) {
+    // Fallback in JSON (UI blijft werken)
+    const s = vraag.toLowerCase();
+    const router = s.includes('omzet') ? { type: 'pdf', hint: 'jaarrekening_2023' } :
+                   s.includes('2022')  ? { type: 'csv', hint: 'omzet_2022.csv' } :
+                   { type: 'unknown', hint: null };
+    return res.status(200).json({
+      antwoord: `(fallback) router: ${router.type} ${router.hint || ''}`,
+      error: e.response?.data || e.message, version: VERSION
+    });
   }
 });
+
 
 /* ---------- PRIMAIRE ROUTE  →  FINNY_MINI (optioneel Azure) ---------- */
 app.post('/api/finiMini', async (req,res)=>{
