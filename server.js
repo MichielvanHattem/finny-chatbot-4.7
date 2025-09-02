@@ -1,6 +1,9 @@
 /**************************************************************************
- * Finny Chatbot 4.7.1 – Patch (Prompt 9.9, betere /api/chat)
- * Behóudt login + /sp/files. /api/chat geeft JSON met { antwoord }.
+ * Finny Chatbot 4.7.1 – Patch (Prompt 9.9 + file context + betere /api/chat)
+ * - Behóudt login + /sp/files
+ * - /api/chat geeft JSON { antwoord } (UI blijft werken)
+ * - Leest (indien ingelogd) het juiste bestand uit Graph en voegt het
+ *   als context toe aan de OpenAI-call (CSV/XML als tekst; PDF best-effort)
  **************************************************************************/
 
 import express                   from 'express';
@@ -20,7 +23,7 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // nodig voor form posts
+app.use(express.urlencoded({ extended: true }));     // form posts
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -61,6 +64,35 @@ function bepaalBestand(vraag) {
   const match = vraag.match(/20\d{2}/);
   if (match && CONFIG.pdf?.[match[0]]) return CONFIG.pdf[match[0]];
   return CONFIG.pdf?.['2024'] || 'Jaarrekening_2024.pdf';
+}
+
+/* ---------- GRAPH HELPERS (bestandscontext) ---------- */
+const GRAPH_BASE = process.env.GRAPH_API_URL || 'https://graph.microsoft.com/v1.0/me/drive';
+
+async function findItemByName(token, name) {
+  const q = encodeURIComponent(name);
+  const url = `${GRAPH_BASE}/root/search(q='${q}')?$top=1&select=id,name,size,webUrl`;
+  const r = await axios.get(url, { headers:{ Authorization:`Bearer ${token}` }});
+  return r.data?.value?.[0] || null;
+}
+async function downloadById(token, id) {
+  const url = `${GRAPH_BASE}/items/${id}/content`;
+  const r = await axios.get(url, { headers:{ Authorization:`Bearer ${token}` }, responseType:'arraybuffer' });
+  return Buffer.from(r.data);
+}
+// heuristische tekstextractie (CSV UTF-16LE + ;  / XML utf-8 / PDF best-effort)
+function bufferToText(buf, type) {
+  try {
+    if (type === 'csv') return buf.toString('utf16le');
+    if (type === 'xml') return buf.toString('utf8');
+    const asUtf8 = buf.toString('utf8');
+    if (asUtf8.includes('\u0000')) return buf.toString('utf16le');
+    return asUtf8;
+  } catch { return ''; }
+}
+function clampChars(s, max = 20000) {
+  if (!s) return '';
+  return s.length > max ? (s.slice(0, max) + `\n\n[TRUNCATED ${s.length - max} chars]`) : s;
 }
 
 /* ---------- MSAL (login + bestandenlijst) ---------- */
@@ -107,7 +139,7 @@ app.get('/debug/prompt', (_req,res)=>{
   res.json({ file: promptInfo.file, hash: promptInfo.hash, preview: promptInfo.text.slice(0,400) });
 });
 
-/* ---------- /api/chat → OpenAI + JSON response ---------- */
+/* ---------- /api/chat → OpenAI + JSON response + FILE CONTEXT ---------- */
 app.post('/api/chat', async (req, res) => {
   const vraag = (req.body?.vraag || req.body?.q || '').trim();
   if (!vraag) return res.status(400).json({ error: 'Lege vraag' });
@@ -116,45 +148,77 @@ app.post('/api/chat', async (req, res) => {
   const key   = process.env.OPENAI_API_KEY;
   const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 
-  // Geen key? Nette stub in JSON, UI kan het tonen
+  // Router (welke file lijkt logisch?)
+  const fType = detectType(vraag);
+  const fName = bepaalBestand(vraag);
+
+  // Probeer context uit Graph te halen (alleen als ingelogd)
+  let context = '';
+  let fileNote = '';
+  const token = req.cookies?.auth_token;
+
+  if (token && fName) {
+    try {
+      const baseName = path.parse(fName).base;
+      const item = await findItemByName(token, baseName);
+      if (item?.id) {
+        const bin = await downloadById(token, item.id);
+        const raw = bufferToText(bin, fType);
+        if (raw) {
+          context = clampChars(raw, 20000);
+          fileNote = `Bestand: ${item.name} (${fType}).`;
+        } else {
+          fileNote = `Bestand ${item.name} gevonden, maar tekstextractie is beperkt.`;
+        }
+      } else {
+        fileNote = `Geen match gevonden voor ${baseName}.`;
+      }
+    } catch (e) {
+      fileNote = `Kon bestand niet laden: ${e.response?.status||''} ${e.response?.statusText||e.message}`;
+    }
+  } else {
+    fileNote = token ? 'Geen bestandsnaam bepaald.' : 'Niet ingelogd voor bestandslezing.';
+  }
+
+  // Geen key? nette stub
   if (!key) {
-    const type = detectType(vraag);
-    const hint = bepaalBestand(vraag);
     return res.status(200).json({
-      antwoord: `(stub) Geen OPENAI_API_KEY. Router: ${type}${hint ? ' ' + hint : ''}`,
+      antwoord: `(stub) Geen OPENAI_API_KEY. Router: ${fType} ${fName||''}. ${fileNote}`,
       provider: 'stub', version: VERSION, promptHash: promptInfo.ok ? promptInfo.hash : null
     });
   }
 
+  // Bouw berichten met optionele context
+  const messages = [
+    { role:'system', content: sys },
+    ...(context ? [{
+      role:'system',
+      content:
+`Je krijgt context uit een gebruikersbestand. Gebruik het ALLEEN als het relevant is.
+[FILE_CONTEXT_BEGIN]
+${context}
+[FILE_CONTEXT_END]
+(Info: ${fileNote})
+Beantwoord de vraag beknopt met cijfers waar mogelijk en noem de bron (CSV/XML/PDF).`
+    }] : []),
+    { role:'user', content: vraag }
+  ];
+
   try {
     const rsp = await axios.post(
       'https://api.openai.com/v1/chat/completions',
-      {
-        model,
-        temperature: 0.2,
-        max_tokens: 800,
-        messages: [
-          { role: 'system', content: sys },
-          { role: 'user',   content: vraag }
-        ]
-      },
-      { headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` } }
+      { model, temperature:0.2, max_tokens:800, messages },
+      { headers:{ 'Content-Type':'application/json', Authorization:`Bearer ${key}` } }
     );
-
     const antwoord = rsp?.data?.choices?.[0]?.message?.content?.trim() || '';
     return res.status(200).json({
-      antwoord, provider: 'openai', version: VERSION,
-      promptHash: promptInfo.ok ? promptInfo.hash : null
+      antwoord, provider:'openai', version: VERSION,
+      promptHash: promptInfo.ok ? promptInfo.hash : null,
+      fileNote: fileNote || undefined
     });
-
   } catch (e) {
-    // Fallback in JSON (UI blijft werken)
-    const s = vraag.toLowerCase();
-    const router = s.includes('omzet') ? { type: 'pdf', hint: 'jaarrekening_2023' } :
-                   s.includes('2022')  ? { type: 'csv', hint: 'omzet_2022.csv' } :
-                   { type: 'unknown', hint: null };
     return res.status(200).json({
-      antwoord: `(fallback) router: ${router.type} ${router.hint || ''}`,
+      antwoord: `(fallback) Model niet bereikbaar. Router: ${fType} ${fName||''}. ${fileNote}`,
       error: e.response?.data || e.message, version: VERSION
     });
   }
