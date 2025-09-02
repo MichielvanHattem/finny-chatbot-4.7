@@ -67,17 +67,34 @@ function bepaalBestand(vraag) {
 }
 
 /* ---------- GRAPH HELPERS (bestandscontext) ---------- */
-const GRAPH_BASE = process.env.GRAPH_API_URL || 'https://graph.microsoft.com/v1.0/me/drive';
+// Voorbeeld van lijst-URL: https://graph.microsoft.com/v1.0/me/drive/root/children
+// Hieruit leiden we de juiste drive-basis af (…/me/drive of …/sites/.../drives/...)
+// zodat downloads/zoekopdrachten geen 404 meer geven.
+function graphBaseFrom(url) {
+  const fallback = 'https://graph.microsoft.com/v1.0/me/drive';
+  if (!url) return fallback;
+  const m = url.match(/^(.*?\/v1\.0\/(?:me\/drive|sites\/[^/]+\/drives\/[^/]+))/i);
+  return (m && m[1]) || fallback;
+}
+const GRAPH_LIST = process.env.GRAPH_API_URL || 'https://graph.microsoft.com/v1.0/me/drive/root/children';
+const GRAPH_BASE = graphBaseFrom(GRAPH_LIST);
 
-async function findItemByName(token, name) {
-  const q = encodeURIComponent(name);
-  const url = `${GRAPH_BASE}/root/search(q='${q}')?$top=1&select=id,name,size,webUrl`;
+async function graphSearch(token, query, top = 10) {
+  const q = encodeURIComponent(query);
+  const url = `${GRAPH_BASE}/root/search(q='${q}')?$top=${top}&select=id,name,size,webUrl`;
   const r = await axios.get(url, { headers:{ Authorization:`Bearer ${token}` }});
-  return r.data?.value?.[0] || null;
+  return r.data?.value || [];
+}
+async function findItemByName(token, name) {
+  const hits = await graphSearch(token, name, 5);
+  return hits.find(h => h.name === name) || hits[0] || null;
 }
 async function downloadById(token, id) {
   const url = `${GRAPH_BASE}/items/${id}/content`;
-  const r = await axios.get(url, { headers:{ Authorization:`Bearer ${token}` }, responseType:'arraybuffer' });
+  const r = await axios.get(url, {
+    headers:{ Authorization:`Bearer ${token}` },
+    responseType:'arraybuffer'
+  });
   return Buffer.from(r.data);
 }
 // heuristische tekstextractie (CSV UTF-16LE + ;  / XML utf-8 / PDF best-effort)
