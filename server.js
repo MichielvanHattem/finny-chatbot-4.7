@@ -54,12 +54,12 @@ try {
 /* ---------- HULPFUNCTIES ---------- */
 function detectType(vraag) {
   if (/rgs|code/i.test(vraag))      return 'csv';
-  if (/transact/i.test(vraag))      return 'xml';
+  if (/transact|xaf|audit/i.test(vraag)) return 'xml';
   return 'pdf';
 }
 function bepaalBestand(vraag) {
   const type = detectType(vraag);
-  if (type === 'csv') return CONFIG.csv || 'omzet_2023.csv';
+  if (type === 'csv') return CONFIG.csv || null;
   if (type === 'xml') return CONFIG.xml || 'GLTransactions_1.xml';
   const match = vraag.match(/20\d{2}/);
   if (match && CONFIG.pdf?.[match[0]]) return CONFIG.pdf[match[0]];
@@ -67,9 +67,7 @@ function bepaalBestand(vraag) {
 }
 
 /* ---------- GRAPH HELPERS (bestandscontext) ---------- */
-// Voorbeeld van lijst-URL: https://graph.microsoft.com/v1.0/me/drive/root/children
-// Hieruit leiden we de juiste drive-basis af (…/me/drive of …/sites/.../drives/...)
-// zodat downloads/zoekopdrachten geen 404 meer geven.
+// Lijst-URL (bv. …/me/drive/root/children) -> drive-basis (…/me/drive of …/sites/.../drives/...)
 function graphBaseFrom(url) {
   const fallback = 'https://graph.microsoft.com/v1.0/me/drive';
   if (!url) return fallback;
@@ -89,6 +87,23 @@ async function findItemByName(token, name) {
   const hits = await graphSearch(token, name, 5);
   return hits.find(h => h.name === name) || hits[0] || null;
 }
+async function findLikelyReport(token, year) {
+  const queries = [
+    `Jaarrekening ${year}`,
+    `Jaarstukken ${year}`,
+    `${year}`,
+    `Jaarrekening`,
+    `Jaarstukken`
+  ];
+  for (const q of queries) {
+    const hits = await graphSearch(token, q, 20);
+    const pdfYear = hits.find(h => h.name?.toLowerCase().endsWith('.pdf') && String(h.name).includes(String(year)));
+    if (pdfYear) return pdfYear;
+    const anyPdf = hits.find(h => h.name?.toLowerCase().endsWith('.pdf'));
+    if (anyPdf) return anyPdf;
+  }
+  return null;
+}
 async function downloadById(token, id) {
   const url = `${GRAPH_BASE}/items/${id}/content`;
   const r = await axios.get(url, {
@@ -97,19 +112,18 @@ async function downloadById(token, id) {
   });
   return Buffer.from(r.data);
 }
-// heuristische tekstextractie (CSV UTF-16LE + ;  / XML utf-8 / PDF best-effort)
+// csv=UTF-16LE (Finny-standaard), xml=UTF-8, pdf best-effort
 function bufferToText(buf, type) {
   try {
     if (type === 'csv') return buf.toString('utf16le');
     if (type === 'xml') return buf.toString('utf8');
-    const asUtf8 = buf.toString('utf8');
-    if (asUtf8.includes('\u0000')) return buf.toString('utf16le');
-    return asUtf8;
+    const u = buf.toString('utf8');
+    return u.includes('\u0000') ? buf.toString('utf16le') : u;
   } catch { return ''; }
 }
 function clampChars(s, max = 20000) {
   if (!s) return '';
-  return s.length > max ? (s.slice(0, max) + `\n\n[TRUNCATED ${s.length - max} chars]`) : s;
+  return s.length > max ? s.slice(0, max) + `\n\n[TRUNCATED ${s.length - max} chars]` : s;
 }
 
 /* ---------- MSAL (login + bestandenlijst) ---------- */
@@ -174,27 +188,31 @@ app.post('/api/chat', async (req, res) => {
   let fileNote = '';
   const token = req.cookies?.auth_token;
 
-  if (token && fName) {
+  if (token) {
     try {
-      const baseName = path.parse(fName).base;
-      const item = await findItemByName(token, baseName);
+      const baseName = fName ? path.parse(fName).base : '';
+      // 1) exact
+      let item = baseName ? await findItemByName(token, baseName) : null;
+      // 2) fuzzy (Jaarrekening/Jaarstukken + jaartal)
+      if (!item) {
+        const yearFromQ    = (vraag.match(/20\d{2}/) || [])[0];
+        const yearFromHint = (baseName.match(/20\d{2}/) || [])[0];
+        const year = yearFromQ || yearFromHint || new Date().getFullYear();
+        item = await findLikelyReport(token, year);
+      }
       if (item?.id) {
         const bin = await downloadById(token, item.id);
         const raw = bufferToText(bin, fType);
-        if (raw) {
-          context = clampChars(raw, 20000);
-          fileNote = `Bestand: ${item.name} (${fType}).`;
-        } else {
-          fileNote = `Bestand ${item.name} gevonden, maar tekstextractie is beperkt.`;
-        }
+        if (raw) { context = clampChars(raw, 20000); fileNote = `Bestand: ${item.name} (${fType}).`; }
+        else     { fileNote = `Bestand ${item.name} gevonden, maar tekstextractie is beperkt.`; }
       } else {
-        fileNote = `Geen match gevonden voor ${baseName}.`;
+        fileNote = `Geen match in Graph (zoek: ${baseName || 'Jaarrekening/Jaarstukken + jaartal'}).`;
       }
     } catch (e) {
-      fileNote = `Kon bestand niet laden: ${e.response?.status||''} ${e.response?.statusText||e.message}`;
+      fileNote = `Graph fout: ${e.response?.status || ''} ${e.response?.statusText || e.message}`;
     }
   } else {
-    fileNote = token ? 'Geen bestandsnaam bepaald.' : 'Niet ingelogd voor bestandslezing.';
+    fileNote = 'Niet ingelogd voor bestandslezing.';
   }
 
   // Geen key? nette stub
