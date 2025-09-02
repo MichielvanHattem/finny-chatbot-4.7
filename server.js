@@ -1,6 +1,6 @@
 /**************************************************************************
  * Finny Chatbot 4.7.1 – Patch (Prompt 9.9, betere /api/chat)
- * Behóudt login + /sp/files. Geeft normale tekst-antwoord via OpenAI.
+ * Behóudt login + /sp/files. /api/chat geeft JSON met { antwoord }.
  **************************************************************************/
 
 import express                   from 'express';
@@ -20,7 +20,7 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json());
-app.use(express.urlencoded({ extended: true })); // belangrijk voor form posts
+app.use(express.urlencoded({ extended: true })); // nodig voor form posts
 app.use(cookieParser());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -160,7 +160,6 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-
 /* ---------- PRIMAIRE ROUTE  →  FINNY_MINI (optioneel Azure) ---------- */
 app.post('/api/finiMini', async (req,res)=>{
   const vraagTxt = (req.body.vraag || req.body.q || '').trim();
@@ -174,7 +173,7 @@ app.post('/api/finiMini', async (req,res)=>{
 
   try{
     const mini = await axios.post(
-      process.env.AZURE_ENDPOINT, // verwacht volledige chat-completions URL
+      process.env.AZURE_ENDPOINT, // volledige chat-completions URL
       {
         messages:[
           { role:'system', content: promptInfo.ok ? promptInfo.text : '' },
